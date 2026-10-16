@@ -140,3 +140,16 @@ def test_two_networks_and_plots(config):
         os.path.isdir(os.path.join(output, f)) for f in files
     )
     assert flex.dload("pr_auc", "Network_A") > flex.dload("pr_auc", "Network_B")
+
+
+def test_size_scatter_labels_only_named_modules(config):
+    run_pipeline(config, {"net": {"path": make_dataset(seed=0), "sort": "high"}})
+    modules = flex.dload("pra_per_module", "net").sort_values("auc_score")
+    named = list(modules["Name"].iloc[:2])  # two low scorers, never filled
+
+    ax = flex.plot_per_module_scatter_by_size(
+        label_only=named, label_map={named[0]: "first", named[1]: "second"}
+    )
+
+    ax.figure.canvas.draw()
+    assert sorted(t.get_text() for t in ax.texts) == ["first", "second"]

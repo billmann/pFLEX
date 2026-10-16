@@ -915,6 +915,41 @@ def _resolve_include(df, pair, names):
     return found
 
 
+def _size_legend(ax, max_genes, genes, point_scale, facecolor, edgecolor, edgewidth, fontsize):
+    """Reference circle sizes under the x label, left-aligned with the axes."""
+    from matplotlib.transforms import offset_copy
+
+    steps = [g for g in genes if g <= max_genes] or [int(max_genes)]
+    handles = [
+        Line2D([], [], linestyle='', marker='o', markerfacecolor=facecolor,
+               markeredgecolor=edgecolor, markeredgewidth=edgewidth,
+               markersize=float(np.sqrt(_marker_area(g, point_scale))), label=str(g))
+        for g in steps
+    ]
+    # Left edge on the axes' left edge, below the offset spine, tick labels
+    # and the x label: 36 pt plus one line per extra label line.
+    below_pt = 36 + 10 * ax.get_xlabel().count("\n")
+    legend = ax.legend(
+        handles=handles, title="Genes in module", loc="upper left",
+        bbox_to_anchor=(0.0, 0.0),
+        bbox_transform=offset_copy(ax.transAxes, fig=ax.figure, y=-below_pt, units="points"),
+        ncol=len(handles), frameon=True, fancybox=True,
+        handlelength=0.6, handletextpad=0.3, columnspacing=0.9,
+        borderaxespad=0.0, borderpad=0.35,
+        title_fontsize=fontsize, fontsize=fontsize, labelcolor=CAPTION_COLOR,
+    )
+    # Reads as a key, not data: thin light-grey frame, grey text, title
+    # aligned with the first circle.
+    legend._legend_box.align = "left"
+    legend.get_title().set_color(CAPTION_COLOR)
+    frame = legend.get_frame()
+    frame.set_edgecolor("0.75")
+    frame.set_linewidth(0.25)
+    frame.set_facecolor("white")
+    frame.set_boxstyle("round", pad=0.0, rounding_size=0.25)
+    return legend
+
+
 def _label_indices(df, pair, highlighted, label_only):
     """Modules that get a text label: all highlighted ones, or only ``label_only``."""
     if label_only is None:
@@ -1179,36 +1214,8 @@ def plot_per_module_scatter(
 
         legend = None
         if size_legend:
-            steps = [g for g in size_legend_genes if g <= n_genes.max()] or [int(n_genes.max())]
-            handles = [
-                Line2D([], [], linestyle='', marker='o', markerfacecolor=nonsig_color,
-                       markeredgecolor=nonsig_border_color, markeredgewidth=nonsig_border_width,
-                       markersize=float(np.sqrt(_marker_area(g, point_scale))), label=str(g))
-                for g in steps
-            ]
-            # Under the x label (fixed gap in font sizes), left-aligned with the axes.
-            from matplotlib.transforms import offset_copy
-            # Left edge on the axes' left edge, below the offset spine, tick
-            # labels and the x label: 36 pt plus one line per extra label line.
-            below_pt = 36 + 10 * ax.get_xlabel().count("\n")
-            legend = ax.legend(
-                handles=handles, title="Genes in module", loc="upper left",
-                bbox_to_anchor=(0.0, 0.0),
-                bbox_transform=offset_copy(ax.transAxes, fig=ax.figure, y=-below_pt, units="points"),
-                ncol=len(handles), frameon=True, fancybox=True,
-                handlelength=0.6, handletextpad=0.3, columnspacing=0.9,
-                borderaxespad=0.0, borderpad=0.35,
-                title_fontsize=fontsize, fontsize=fontsize, labelcolor=CAPTION_COLOR,
-            )
-            # Reads as a key, not data: thin light-grey frame, grey text, title
-            # aligned with the first circle.
-            legend._legend_box.align = "left"
-            legend.get_title().set_color(CAPTION_COLOR)
-            frame = legend.get_frame()
-            frame.set_edgecolor("0.75")
-            frame.set_linewidth(0.25)
-            frame.set_facecolor("white")
-            frame.set_boxstyle("round", pad=0.0, rounding_size=0.25)
+            legend = _size_legend(ax, n_genes.max(), size_legend_genes, point_scale, nonsig_color,
+                                  nonsig_border_color, nonsig_border_width, fontsize)
         text = caption or ""
         if n_shared == 0:
             text = text.replace("; grey labelled: the {k_both} modules good in both", "")
@@ -1279,12 +1286,20 @@ def plot_per_module_scatter_by_size(
     caption="Filled: the {n_labels} modules with the highest AUPRC.",
     dataset=None,
     ax=None,
+    label_only=None,
+    size_legend=True,
+    size_legend_genes=(5, 20, 100),
+    y_ticks=None,
 ):
     """Per-module AUPRC against module size, one figure per dataset.
 
     The ``n_labels`` best modules are filled with the dataset colour and
     labelled; styling follows :func:`plot_per_module_scatter`. ``dataset``
     picks one dataset (default: all, or the first when drawing into ``ax``).
+    ``label_only`` (module names, case-insensitive) labels only these modules
+    instead of the filled ones; filling is unchanged. ``size_legend`` shows
+    reference circle sizes under the plot, as in :func:`plot_per_module_scatter`.
+    ``y_ticks`` sets the gene-count ticks; the axis reaches at least the last one.
     """
     config = dload("config")
     rdict = dload("pra_per_module")
@@ -1331,15 +1346,25 @@ def plot_per_module_scatter_by_size(
             zorder=2
         )
 
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+        if y_ticks is None:
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
         ax.set_xlabel(f"{_display_name(key)} AUPRC")
         ax.set_ylabel("Genes in module")
         ax.set_box_aspect(1)
         _set_title(ax, (title or "").format(dataset=_display_name(key)))
-        _caption(ax, (caption or "").format(n_labels=n_labels))
         ax.grid(visible=False, which='both', axis='both')
         ax.set_xlim(0, 1.0)
-        ax.set_ylim(0, sorted_pc.n_used_genes.max() * 1.05)
+        y_top = sorted_pc.n_used_genes.max() * 1.05
+        if y_ticks is not None:
+            ax.set_yticks(list(y_ticks))
+            y_top = max(y_top, max(y_ticks))
+        ax.set_ylim(0, y_top)
+        legend = None
+        if size_legend:
+            legend = _size_legend(ax, sorted_pc.n_used_genes.max(), size_legend_genes, point_scale,
+                                  nonsig_color, nonsig_border_color, nonsig_border_width,
+                                  PUBLICATION_RC["font.size"])
+        _caption(ax, (caption or "").format(n_labels=n_labels), below=[ax] + ([legend] if legend else []))
         _unit_ticks(ax, "x")
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -1347,13 +1372,16 @@ def plot_per_module_scatter_by_size(
         ax.spines['bottom'].set_position(('outward', spine_offset))
 
         if show_labels:
+            labelled = top_labels
+            if label_only is not None:
+                labelled = per_module.loc[_resolve_include(per_module, ("auc_score",), label_only)]
             label_points = [
                 (row.auc_score, row.n_used_genes, label_text(row.Name), float(_marker_area(row.n_used_genes, point_scale)))
-                for _, row in top_labels.iterrows()
+                for _, row in labelled.iterrows()
             ]
             obstacles = [
                 (row.auc_score, row.n_used_genes, float(_marker_area(row.n_used_genes, point_scale)))
-                for _, row in rest.iterrows()
+                for _, row in per_module.drop(index=labelled.index).iterrows()
             ]
 
             def place(ax=ax, label_points=label_points, obstacles=obstacles):
