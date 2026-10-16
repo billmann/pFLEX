@@ -166,21 +166,26 @@ def _place_legend(ax, handles=None, labels=None, above_ax=None, above_pad=0.5, *
 
 
 
-def _trim_pr_xaxis(ax, min_precision=0.05, x_min=10):
-    """End a log TP axis where every curve has dropped below ``min_precision``.
+def _trim_pr_xaxis(ax, min_precision=None, x_min=10):
+    """End a log TP axis where the longest curve stops.
 
-    PR curves trail off near zero precision for a decade or more; that tail
-    adds width without information. ``ax`` may be a list of axes sharing x.
+    With ``min_precision`` set, end it instead where every curve has dropped
+    below that precision, cutting the low-precision tail. ``ax`` may be a list
+    of axes sharing x.
     """
     axes = ax if isinstance(ax, (list, tuple)) else [ax]
     ax = axes[0]
     x_max = 0.0
     for line in (line for a in axes for line in a.get_lines()):
         x, y = (np.asarray(v, dtype=float) for v in line.get_data())
-        keep = np.isfinite(x) & np.isfinite(y) & (y >= min_precision)
+        keep = np.isfinite(x) & np.isfinite(y)
+        if min_precision is not None:
+            keep &= y >= min_precision
         if keep.any():
             x_max = max(x_max, float(x[keep].max()))
-    if x_max > x_min:
+    if x_max > x_min and min_precision is None:
+        ax.set_xlim(x_min, x_max * 1.05)
+    elif x_max > x_min:
         # Label the next power of ten and let the axis (and curves) run on a
         # little past it, so the line does not stop exactly on the last tick.
         ax.set_xlim(x_min, 10 ** (np.ceil(np.log10(x_max * 1.05)) + 0.12))
@@ -759,49 +764,76 @@ def _setup_log_tp_axis(ax, hide_minor_ticks):
     ax._pflex_log_ticks = True  # every decade ticked; labels fitted in _fit_unit_ticks
 
 
-def _finish_pr_axes(ax, min_precision, title=None):
+def _global_prevalence(pra):
+    """Share of true-positive pairs among all ranked pairs (the precision of a random ranking)."""
+    if "prediction" in pra:
+        return float(pra["prediction"].mean())
+    return float(pra.tp.iloc[-1]) / len(pra)
+
+
+def _finish_pr_axes(ax, min_precision, title=None, baselines=()):
+    """``baselines`` are global prevalences drawn as black dashed lines."""
     ax.set_box_aspect(CURVE_BOX_ASPECT)
     ax.set(xlabel=_tp_axis_label(), ylabel="Precision")
     _set_title(ax, title)
     ax.set_ylim(0, 1)
     _unit_ticks(ax, "y")
     _trim_pr_xaxis(ax, min_precision)
-    _place_legend(ax)
+    handles = labels = None
+    if baselines:
+        handles, labels = ax.get_legend_handles_labels()
+        # Drawn after trimming over the final x range, so a flat line neither
+        # stretches the axis nor hides from the legend placement.
+        # Datasets over the same genes share one baseline, so draw each value once.
+        xlim = ax.get_xlim()
+        for precision in sorted({round(p, 6) for p in baselines}):
+            ax.plot(xlim, [precision, precision], c="black", linestyle="--", linewidth=0.8)
+        ax.set_xlim(xlim)
+        handles.append(Line2D([], [], c="black", linestyle="--", linewidth=0.8))
+        labels.append("Global prevalence")
+    _place_legend(ax, handles, labels)
     ax.grid(False)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
 
 @_publication_style
-def plot_precision_recall_curve(line_width=1.0, hide_minor_ticks=True, min_precision=0.05,
+def plot_precision_recall_curve(line_width=1.0, hide_minor_ticks=True, min_precision=None,
                                 title="Global Precision–Recall (precision of top-ranked gene pairs)",
                                 caption="Gene pairs ranked by score; a true positive is a pair "
                                         "sharing a module in {standard}.",
-                                ax=None):
+                                global_prevalence=False, ax=None):
+    """Global PR curve of every dataset.
+
+    ``global_prevalence=True`` adds a black dashed line at the fraction of all
+    gene pairs that are true positives, the precision a random ranking would reach.
+    """
     pra = dload("pra")
     config = dload("config")
     fig, ax, owns = _start(ax, CURVE_FIGSIZE)
     _setup_log_tp_axis(ax, hide_minor_ticks)
 
+    curves = pra if isinstance(pra, dict) else {None: pra}
     if isinstance(pra, dict):
-        names = list(pra.keys())
-        colors = _plot_dataset_colors(names, None, config, dload("input", "colors"))
-        for name, color in zip(names, colors):
-            val = pra[name]
-            val = val[val.tp > 10]
-            ax.plot(val.tp, val.precision, c=color, label=_display_name(name), linewidth=line_width, alpha=0.9)
+        colors = _plot_dataset_colors(list(pra), None, config, dload("input", "colors"))
     else:
-        pra = pra[pra.tp > 10]
-        ax.plot(pra.tp, pra.precision, c="black", label="Precision Recall Curve", linewidth=line_width, alpha=0.9)
+        colors = ["black"]
+    baselines = []
+    for (name, val), color in zip(curves.items(), colors):
+        label = _display_name(name) if name is not None else "Precision Recall Curve"
+        if global_prevalence:
+            baselines.append(_global_prevalence(val))
+        shown = val[val.tp > 10]
+        ax.plot(shown.tp, shown.precision, c=color, label=label, linewidth=line_width, alpha=0.9)
 
-    _finish_pr_axes(ax, min_precision, title)
+    _finish_pr_axes(ax, min_precision, title, baselines)
     _caption(ax, (caption or "").format(standard=config.get("functional_standard", "the reference set")))
     _finish(fig, owns, config, "precision_recall_curve")
     return ax
 
 
 @_publication_style
-def plot_aggregated_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_precision=0.05, ax=None):
+def plot_aggregated_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_precision=None, ax=None):
     """
     Plots an aggregated Precision-Recall curve with mean line and min-max shading.
     agg_df should be indexed by 'tp' and contain 'mean', 'min', 'max' columns for precision.
@@ -820,7 +852,7 @@ def plot_aggregated_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_preci
 
 
 @_publication_style
-def plot_iqr_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_precision=0.05, ax=None):
+def plot_iqr_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_precision=None, ax=None):
     """
     Plots an aggregated Precision-Recall curve with mean line and IQR (25-75%) shading.
     agg_df should be indexed by 'tp' and contain 'mean', '25%', '75%' columns for precision.
@@ -839,7 +871,7 @@ def plot_iqr_pra(agg_df, line_width=1.0, hide_minor_ticks=True, min_precision=0.
 
 
 @_publication_style
-def plot_all_runs_pra(pra_list, mean_df=None, line_width=1.0, hide_minor_ticks=True, min_precision=0.05, ax=None):
+def plot_all_runs_pra(pra_list, mean_df=None, line_width=1.0, hide_minor_ticks=True, min_precision=None, ax=None):
     """
     Plots all individual Precision-Recall curves faintly, with an optional mean line.
     pra_list: list of dataframes (each with 'tp' and 'precision' columns) OR list of Series (if index is tp)
@@ -865,11 +897,38 @@ def plot_all_runs_pra(pra_list, mean_df=None, line_width=1.0, hide_minor_ticks=T
     return ax
 
 
-def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared):
+def _resolve_include(df, pair, names):
+    """Index of the modules named in ``names`` (case-insensitive exact match).
+
+    When several modules share a name, the one with the highest AUPRC in
+    either dataset is used. Unknown names are logged and skipped.
+    """
+    scored = df.dropna(subset=list(pair))
+    lowered = scored["Name"].astype(str).str.strip().str.lower()
+    found = []
+    for name in names:
+        matches = scored[lowered == str(name).strip().lower()]
+        if matches.empty:
+            log.warning(f"plot_per_module_scatter: no module named '{name}' to include.")
+            continue
+        found.append(matches[list(pair)].max(axis=1).idxmax())
+    return found
+
+
+def _label_indices(df, pair, highlighted, label_only):
+    """Modules that get a text label: all highlighted ones, or only ``label_only``."""
+    if label_only is None:
+        return highlighted
+    return pd.Index(_resolve_include(df, pair, label_only))
+
+
+def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared, include=()):
     """Pick the modules highlighted in :func:`plot_per_module_scatter`.
 
     ``scores`` has one column per dataset (x, y). Returns the index of the
     x-specific, y-specific and shared modules; no module is in two groups.
+    Modules in ``include`` (index labels of ``scores``) that were not picked
+    are added to the dataset in which they score higher.
     """
     x, y = scores.columns
     # Shared first: good in both datasets, ranked by the lower of the two.
@@ -885,6 +944,14 @@ def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared):
         prefers_x = rest[x] >= rest[y]
         x_only = rest.loc[prefers_x, x].nlargest(n_per_dataset).index
         y_only = rest.loc[~prefers_x, y].nlargest(n_per_dataset).index
+    picked = shared.union(x_only).union(y_only)
+    extra = [idx for idx in dict.fromkeys(include) if idx in scores.index and idx not in picked]
+    x_extra = [idx for idx in extra if scores.at[idx, x] >= scores.at[idx, y]]
+    y_extra = [idx for idx in extra if scores.at[idx, x] < scores.at[idx, y]]
+    if x_extra:
+        x_only = x_only.append(pd.Index(x_extra))
+    if y_extra:
+        y_only = y_only.append(pd.Index(y_extra))
     return x_only, y_only, shared
 
 
@@ -921,6 +988,8 @@ def plot_per_module_scatter(
     n_labels=None,
     labels_per_dataset=None,
     labels_in_both=None,
+    include=None,
+    label_only=None,
 ):
     """Compare per-module AUPRC between every pair of datasets.
 
@@ -968,6 +1037,15 @@ def plot_per_module_scatter(
         Show reference circle sizes under the plot, above the caption.
     size_legend_genes : tuple of int
         Gene counts shown in the size legend (default 5, 20, 100).
+    include : list of str, optional
+        Module names (as in the ``Name`` column, case-insensitive) that are
+        always highlighted and labelled, in the colour of the dataset where
+        they score higher, even below ``min_genes``. With duplicate names the
+        best-scoring module is used.
+    label_only : list of str, optional
+        Label only these modules (names as for ``include``). Colouring is
+        unchanged; a named module that is not highlighted is labelled on its
+        background circle. Default: label every highlighted module.
     pair : tuple of two dataset names, optional
         Plot only this pair (x, y). Defaults to every pair, or the first pair
         when drawing into ``ax``.
@@ -1040,9 +1118,11 @@ def plot_per_module_scatter(
 
     panel = ax
     for pair in column_pairs:
-        scores = df[[pair[0], pair[1]]][n_genes >= min_genes].dropna()
+        include_idx = _resolve_include(df, pair, include or [])
+        keep = (n_genes >= min_genes) | df.index.isin(include_idx)
+        scores = df[[pair[0], pair[1]]][keep].dropna()
         significant_pair0_only, significant_pair1_only, significant_in_both = (
-            _select_scatter_modules(scores, highlight, n_per_dataset, n_shared)
+            _select_scatter_modules(scores, highlight, n_per_dataset, n_shared, include_idx)
         )
         significant_indices = significant_pair0_only.union(significant_pair1_only).union(significant_in_both)
 
@@ -1137,9 +1217,12 @@ def plot_per_module_scatter(
 
 
         if show_labels:
-            sig = df.loc[significant_indices, [pair[0], pair[1], "Name"]].dropna(subset=[pair[0], pair[1]])
+            label_idx = _label_indices(df, pair, significant_indices, label_only)
+            sig = df.loc[label_idx, [pair[0], pair[1], "Name"]].dropna(subset=[pair[0], pair[1]])
             # Most informative first (placed first): high scores that differ between datasets.
             priority = sig[[pair[0], pair[1]]].max(axis=1) + (sig[pair[0]] - sig[pair[1]]).abs()
+            # Included modules are placed first so they always find room.
+            priority[priority.index.isin(include_idx)] += 10
             order = priority.sort_values(ascending=False).index
             direction = {idx: 0.0 for idx in significant_pair0_only}          # x-specific: right
             direction.update({idx: np.pi / 2 for idx in significant_pair1_only})  # y-specific: up
@@ -1151,7 +1234,7 @@ def plot_per_module_scatter(
             ]
             obstacles = [
                 (df.loc[idx, pair[0]], df.loc[idx, pair[1]], sizes[idx])
-                for idx in bg_df.index.append(significant_indices.difference(order))
+                for idx in bg_df.index.append(significant_indices).difference(order)
             ]
 
             def place(ax=ax, label_points=label_points, obstacles=obstacles):
@@ -1780,7 +1863,7 @@ def plot_globalpr_filter(
     save=True,
     outname=None,
     linewidth=1.0,
-    min_precision=0.05,
+    min_precision=None,
     title="Global precision–recall under complex filters",
     caption=FILTER_CAPTION,
 ):

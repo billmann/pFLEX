@@ -93,6 +93,28 @@ def test_mpr_coverage_rule():
     assert list(coverage) == [0, 2]
 
 
+def test_pr_curve_global_prevalence_line(perfect_run):
+    prevalence = N_POSITIVE_PAIRS / (12 * 11 // 2)
+
+    ax = flex.plot_precision_recall_curve(global_prevalence=True)
+
+    dashed = [line for line in ax.get_lines() if line.get_linestyle() == "--"]
+    assert len(dashed) == 1
+    assert dashed[0].get_ydata() == pytest.approx([prevalence, prevalence])
+    assert dashed[0].get_color() == "black"
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert labels == ["perfect", "Global prevalence"]
+
+
+def test_pr_curve_x_axis_shows_whole_curve(config):
+    run_pipeline(config, {"noisy": {"path": make_dataset(seed=5, signal=0.03), "sort": "high"}})
+
+    ax = flex.plot_precision_recall_curve()
+
+    last_tp = flex.dload("pra", "noisy")["tp"].max()
+    assert ax.get_xlim()[1] >= last_tp
+
+
 def test_two_networks_and_plots(config):
     inputs = {
         "Network A": {"path": make_dataset(seed=0), "sort": "high", "color": "#4E79A7"},
@@ -101,6 +123,7 @@ def test_two_networks_and_plots(config):
     run_pipeline(config, inputs)
 
     flex.plot_precision_recall_curve()
+    flex.plot_precision_recall_curve(global_prevalence=True)
     flex.plot_auc_scores()
     flex.plot_per_module_scatter(min_genes=1)
     flex.plot_per_module_scatter(highlight="rank", n_per_dataset=2, n_shared=1)
