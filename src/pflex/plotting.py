@@ -897,11 +897,38 @@ def plot_all_runs_pra(pra_list, mean_df=None, line_width=1.0, hide_minor_ticks=T
     return ax
 
 
-def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared):
+def _resolve_include(df, pair, names):
+    """Index of the modules named in ``names`` (case-insensitive exact match).
+
+    When several modules share a name, the one with the highest AUPRC in
+    either dataset is used. Unknown names are logged and skipped.
+    """
+    scored = df.dropna(subset=list(pair))
+    lowered = scored["Name"].astype(str).str.strip().str.lower()
+    found = []
+    for name in names:
+        matches = scored[lowered == str(name).strip().lower()]
+        if matches.empty:
+            log.warning(f"plot_per_module_scatter: no module named '{name}' to include.")
+            continue
+        found.append(matches[list(pair)].max(axis=1).idxmax())
+    return found
+
+
+def _label_indices(df, pair, highlighted, label_only):
+    """Modules that get a text label: all highlighted ones, or only ``label_only``."""
+    if label_only is None:
+        return highlighted
+    return pd.Index(_resolve_include(df, pair, label_only))
+
+
+def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared, include=()):
     """Pick the modules highlighted in :func:`plot_per_module_scatter`.
 
     ``scores`` has one column per dataset (x, y). Returns the index of the
     x-specific, y-specific and shared modules; no module is in two groups.
+    Modules in ``include`` (index labels of ``scores``) that were not picked
+    are added to the dataset in which they score higher.
     """
     x, y = scores.columns
     # Shared first: good in both datasets, ranked by the lower of the two.
@@ -917,6 +944,14 @@ def _select_scatter_modules(scores, highlight, n_per_dataset, n_shared):
         prefers_x = rest[x] >= rest[y]
         x_only = rest.loc[prefers_x, x].nlargest(n_per_dataset).index
         y_only = rest.loc[~prefers_x, y].nlargest(n_per_dataset).index
+    picked = shared.union(x_only).union(y_only)
+    extra = [idx for idx in dict.fromkeys(include) if idx in scores.index and idx not in picked]
+    x_extra = [idx for idx in extra if scores.at[idx, x] >= scores.at[idx, y]]
+    y_extra = [idx for idx in extra if scores.at[idx, x] < scores.at[idx, y]]
+    if x_extra:
+        x_only = x_only.append(pd.Index(x_extra))
+    if y_extra:
+        y_only = y_only.append(pd.Index(y_extra))
     return x_only, y_only, shared
 
 
@@ -953,6 +988,8 @@ def plot_per_module_scatter(
     n_labels=None,
     labels_per_dataset=None,
     labels_in_both=None,
+    include=None,
+    label_only=None,
 ):
     """Compare per-module AUPRC between every pair of datasets.
 
@@ -1000,6 +1037,15 @@ def plot_per_module_scatter(
         Show reference circle sizes under the plot, above the caption.
     size_legend_genes : tuple of int
         Gene counts shown in the size legend (default 5, 20, 100).
+    include : list of str, optional
+        Module names (as in the ``Name`` column, case-insensitive) that are
+        always highlighted and labelled, in the colour of the dataset where
+        they score higher, even below ``min_genes``. With duplicate names the
+        best-scoring module is used.
+    label_only : list of str, optional
+        Label only these modules (names as for ``include``). Colouring is
+        unchanged; a named module that is not highlighted is labelled on its
+        background circle. Default: label every highlighted module.
     pair : tuple of two dataset names, optional
         Plot only this pair (x, y). Defaults to every pair, or the first pair
         when drawing into ``ax``.
@@ -1072,9 +1118,11 @@ def plot_per_module_scatter(
 
     panel = ax
     for pair in column_pairs:
-        scores = df[[pair[0], pair[1]]][n_genes >= min_genes].dropna()
+        include_idx = _resolve_include(df, pair, include or [])
+        keep = (n_genes >= min_genes) | df.index.isin(include_idx)
+        scores = df[[pair[0], pair[1]]][keep].dropna()
         significant_pair0_only, significant_pair1_only, significant_in_both = (
-            _select_scatter_modules(scores, highlight, n_per_dataset, n_shared)
+            _select_scatter_modules(scores, highlight, n_per_dataset, n_shared, include_idx)
         )
         significant_indices = significant_pair0_only.union(significant_pair1_only).union(significant_in_both)
 
@@ -1169,9 +1217,12 @@ def plot_per_module_scatter(
 
 
         if show_labels:
-            sig = df.loc[significant_indices, [pair[0], pair[1], "Name"]].dropna(subset=[pair[0], pair[1]])
+            label_idx = _label_indices(df, pair, significant_indices, label_only)
+            sig = df.loc[label_idx, [pair[0], pair[1], "Name"]].dropna(subset=[pair[0], pair[1]])
             # Most informative first (placed first): high scores that differ between datasets.
             priority = sig[[pair[0], pair[1]]].max(axis=1) + (sig[pair[0]] - sig[pair[1]]).abs()
+            # Included modules are placed first so they always find room.
+            priority[priority.index.isin(include_idx)] += 10
             order = priority.sort_values(ascending=False).index
             direction = {idx: 0.0 for idx in significant_pair0_only}          # x-specific: right
             direction.update({idx: np.pi / 2 for idx in significant_pair1_only})  # y-specific: up
@@ -1183,7 +1234,7 @@ def plot_per_module_scatter(
             ]
             obstacles = [
                 (df.loc[idx, pair[0]], df.loc[idx, pair[1]], sizes[idx])
-                for idx in bg_df.index.append(significant_indices.difference(order))
+                for idx in bg_df.index.append(significant_indices).difference(order)
             ]
 
             def place(ax=ax, label_points=label_points, obstacles=obstacles):
